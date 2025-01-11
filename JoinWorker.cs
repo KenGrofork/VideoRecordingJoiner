@@ -247,7 +247,7 @@ namespace VideoRecordingJoiner
 			if (line.IsNullOrEmpty() || !Regex.IsMatch(line, @"(size=|overhead:)", RegexOptions.Singleline | RegexOptions.IgnoreCase))
 				return 0;
 
-			line = Regex.Replace(line, @"((?<=[:=])\s+|\[[^\]]+\]\s+)", ""); // 清除在:=后有可能多的对齐空格
+			line = Regex.Replace(line, @"((?<=[:=])\s+|$$[^$$]+\]\s+)", ""); // 清除在:=后有可能多的对齐空格
 			// 对行进行拆解
 			var matches = Regex.Matches(line, @"([\w\s]+)[=:]([\d:\.\-/+e\w%]+)\s*", RegexOptions.Singleline | RegexOptions.IgnoreCase);
 			var dataMap = matches.ToDictionary(m => m.GetGroupValue(1), m => m.GetGroupValue(2));
@@ -332,94 +332,103 @@ namespace VideoRecordingJoiner
 			Console.WriteLine($"将要合并 {tasks.Count} 个视频");
 
 			// 对任务进行分组
-			var tgs = tasks.GroupBy(s => (s.dateTime.Year << 9) | (s.dateTime.Month << 5) | (IsGroupByMonth ? 0 : s.dateTime.Day)).Select(s => new { key = s.Key, list = s.OrderBy(x => x.dateTime).Select(x => x.path).ToArray() }).OrderBy(s => s.key).ToList();
-			foreach (var tg in tgs)
+			var tgs = tasks.GroupBy(s => (s.dateTime.Year << 9) | (s.dateTime.Month << 5) | (IsGroupByMonth ? 0 : s.dateTime.Day))
+				.Select(s => new { key = s.Key, list = s.OrderBy(x => x.dateTime).Select(x => x.path).ToArray() })
+				.OrderBy(s => s.key)
+				.ToList();
+
+			var groupedByPrefix = tgs.GroupBy(t => Path.GetFileNameWithoutExtension(t.list.First()).Substring(0, 3));
+
+			foreach (var group in groupedByPrefix)
 			{
-				var outName = GetTargetPathName(tg.key);
-				var outFile = Path.Combine(Target, outName);
-				var tmpFile = outFile + ".tmp";
-
-				Console.WriteLine($"=> 初次合并，目标路径：{outFile}");
-				Console.WriteLine($"=> 包含 {tg.list.Length} 视频：");
-				for (int i = 0; i < tg.list.Length; i++)
+				foreach (var tg in group)
 				{
-					Console.WriteLine($"  [{i + 1:00000}] {tg.list[i]}");
-				}
+					var outName = GetTargetPathName(tg.key);
+					var outFile = Path.Combine(Target, outName);
+					var tmpFile = outFile + ".tmp";
 
-				try
-				{
-					Directory.CreateDirectory(Path.GetDirectoryName(outFile)!);
-				}
-				catch (Exception e)
-				{
-					Console.WriteLine($"{tg.key} => 创建文件夹失败：{e.Message}");
-					continue;
-				}
-
-				var srcFullPath = tg.list.Select(Path.GetFullPath).ToArray();
-				if (await CombineAsync(srcFullPath, tmpFile, true).ConfigureAwait(false))
-				{
-					if (TryFixMoovAtom)
-						Untrunc.LogSucceedCombine(srcFullPath);
-
-					Console.WriteLine("- 合并成功！");
-
-					if (File.Exists(outFile))
+					Console.WriteLine($"=> 初次合并，目标路径：{outFile}");
+					Console.WriteLine($"=> 包含 {tg.list.Length} 视频：");
+					for (int i = 0; i < tg.list.Length; i++)
 					{
-						Console.WriteLine("- 已存在原始合并文件，二次合并！");
-						if (await CombineAsync(new[] { outFile, tmpFile }, tmpFile + ".swp", false).ConfigureAwait(false))
-						{
-							Console.WriteLine("- 二次合并完成！");
-							File.Delete(outFile);
-							File.Delete(tmpFile);
-							File.Move(tmpFile + ".swp", outFile);
-						}
-						else
-						{
-							Console.WriteLine("- 二次合并失败！");
-							continue;
-						}
-					}
-					else
-					{
-						File.Move(tmpFile, outFile);
+						Console.WriteLine($"  [{i + 1:00000}] {tg.list[i]}");
 					}
 
-					Console.WriteLine($"- 正在{(DeleteAfterCombine ? "删除" : "重命名")}源文件");
-					foreach (var file in srcFullPath)
+					try
 					{
-						try
+						Directory.CreateDirectory(Path.GetDirectoryName(outFile)!);
+					}
+					catch (Exception e)
+					{
+						Console.WriteLine($"{tg.key} => 创建文件夹失败：{e.Message}");
+						continue;
+					}
+
+					var srcFullPath = tg.list.Select(Path.GetFullPath).ToArray();
+					if (await CombineAsync(srcFullPath, tmpFile, true).ConfigureAwait(false))
+					{
+						if (TryFixMoovAtom)
+							Untrunc.LogSucceedCombine(srcFullPath);
+
+						Console.WriteLine("- 合并成功！");
+
+						if (File.Exists(outFile))
 						{
-							if (Untrunc.IsReferencedByUntrunc(file))
+							Console.WriteLine("- 已存在原始合并文件，二次合并！");
+							if (await CombineAsync(new[] { outFile, tmpFile }, tmpFile + ".swp", false).ConfigureAwait(false))
 							{
-								Console.WriteLine($"  - 自动修复参考文件：{file}，暂时保留");
-								_pendingRemoveFileList.Add(file);
-							}
-							else if (DeleteAfterCombine)
-							{
-								File.Delete(file);
-								Console.WriteLine($"  - 已删除：{file}");
+								Console.WriteLine("- 二次合并完成！");
+								File.Delete(outFile);
+								File.Delete(tmpFile);
+								File.Move(tmpFile + ".swp", outFile);
 							}
 							else
 							{
-								Console.WriteLine($"  - 重命名：{file}");
-								File.Move(file, file + ".old");
+								Console.WriteLine("- 二次合并失败！");
+								continue;
 							}
 						}
-						catch (Exception e)
+						else
 						{
-							Console.WriteLine($"  - 无法操作：{file} -> {e.Message}");
+							File.Move(tmpFile, outFile);
 						}
+
+						Console.WriteLine($"- 正在{(DeleteAfterCombine ? "删除" : "重命名")}源文件");
+						foreach (var file in srcFullPath)
+						{
+							try
+							{
+								if (Untrunc.IsReferencedByUntrunc(file))
+								{
+									Console.WriteLine($"  - 自动修复参考文件：{file}，暂时保留");
+									_pendingRemoveFileList.Add(file);
+								}
+								else if (DeleteAfterCombine)
+								{
+									File.Delete(file);
+									Console.WriteLine($"  - 已删除：{file}");
+								}
+								else
+								{
+									Console.WriteLine($"  - 重命名：{file}");
+									File.Move(file, file + ".old");
+								}
+							}
+							catch (Exception e)
+							{
+								Console.WriteLine($"  - 无法操作：{file} -> {e.Message}");
+							}
+						}
+						Console.WriteLine("- 操作完成！");
 					}
-					Console.WriteLine("- 操作完成！");
+					else
+					{
+						Console.WriteLine("- 合并失败！");
+						if (File.Exists(tmpFile))
+							File.Delete(tmpFile);
+					}
+					CleanUpPendingFile(false);
 				}
-				else
-				{
-					Console.WriteLine("- 合并失败！");
-					if (File.Exists(tmpFile))
-						File.Delete(tmpFile);
-				}
-				CleanUpPendingFile(false);
 			}
 
 			CleanUpPendingFile(true);
@@ -488,4 +497,3 @@ namespace VideoRecordingJoiner
 			}
 		}
 	}
-}
