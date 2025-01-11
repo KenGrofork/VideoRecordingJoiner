@@ -294,145 +294,136 @@ namespace VideoRecordingJoiner
 		public List<string> SourceFiles { get; } = new List<string>();
 
 		public async Task JoinAsync()
+		{
+			if (FileNameFormat.IsNullOrEmpty())
+				FileNameFormat = IsGroupByMonth ? "yyyy-MM" : $"yyyy-MM{Path.DirectorySeparatorChar}dd";
+
+			// 定位所有文件和目录
+			Console.WriteLine("正在搜索文件和目录...");
+
+			var files = SourceFiles.SelectMany(
+					s => Directory.Exists(s) ? Directory.GetFiles(s, "*.mp4", SearchOption.AllDirectories) : File.Exists(s) ? new[] { s } : new string[0] { })
+				.ToArray();
+			Console.WriteLine($"搜索到了 {files.Length} 个文件，正在预处理 ...");
+
+			var tasks = new List<(DateTime dateTime, string path)>();
+
+			foreach (var file in files)
 			{
-				if (FileNameFormat.IsNullOrEmpty())
-					FileNameFormat = IsGroupByMonth ? "yyyy-MM" : $"yyyy-MM{Path.DirectorySeparatorChar}dd";
+				var m = ParseDateTimeFromFileName(Path.GetFileNameWithoutExtension(file));
+				if (m != null)
+					tasks.Add((m.Value, file));
+			}
 
-				// 定位所有文件和目录
-				Console.WriteLine("正在搜索文件和目录...");
+			if (tasks.Count == 0)
+			{
+				Console.WriteLine("请通过参数指定要合并的文件或文件夹！");
+				return;
+			}
+			if (Target.IsNullOrEmpty())
+			{
+				Target = Environment.CurrentDirectory;
+				Console.WriteLine("未指定输出目录，自动设定为当前目录");
+			}
+			Target = Path.GetFullPath(Target);
+			Console.WriteLine($"合并后的文件位置在：{Target}");
+			if (DeleteAfterCombine) Console.WriteLine("合并后将会删除源文件");
+			else Console.WriteLine("合并后将会重命名源文件");
+			Console.WriteLine($"将要合并 {tasks.Count} 个视频");
 
-				var files = SourceFiles.SelectMany(
-			 s => Directory.Exists(s) ? Directory.GetFiles(s, "*.mp4", SearchOption.All) : File.Exists(s) ? new[] { s } : new string[0] { })
-					.ToArray();
-				Console.WriteLine($"搜索到了 {files.Length} 个文件，正在预处理 ...");
+			// 对任务进行分组
+			var tgs = tasks.GroupBy(s => (s.dateTime.Year << 9) | (s.dateTime.Month << 5) | (IsGroupByMonth ? 0 : s.dateTime.Day)).Select(s => new { key = s.Key, list = s.OrderBy(x => x.dateTime).Select(x => x.path).ToArray() }).OrderBy(s => s.key).ToList();
+			foreach (var tg in tgs)
+			{
+				var outName = GetTargetPathName(tg.key);
+				var outFile = Path.Combine(Target, outName);
+				var tmpFile = outFile + ".tmp";
 
-				var tasks = new List<(DateTime dateTime, string path)>();
-
-				foreach (var file in files)
+				Console.WriteLine($"=> 初次合并，目标路径：{outFile}");
+				Console.WriteLine($"=> 包含 {tg.list.Length} 视频：");
+				for (int i = 0; i < tg.list.Length; i++)
 				{
-					var m = ParseDateTimeFromFileName(Path.GetFileNameWithoutExtension(file));
-					if (m != null)
-			 tasks.Add((m.Value, file));
+					Console.WriteLine($"  [{i + 1:00000}] {tg.list[i]}");
 				}
 
-				if (tasks.Count == 0)
+				try
 				{
-					Console.WriteLine("请通过参数指定要合并的文件或文件夹！");
-					return;
+					Directory.CreateDirectory(Path.GetDirectoryName(outFile)!);
 				}
-				if (Target.IsNullOrEmpty())
+				catch (Exception e)
 				{
-					Target =.CurrentDirectory;
-					Console.WriteLine("未指定输出目录，自动设定为当前目录");
+					Console.WriteLine($"{tg.key} => 创建文件夹失败：{e.Message}");
+					continue;
 				}
-				Target = Path.GetFullPath(Target);
-				Console.WriteLine($"合并后的文件位置在：{Target}");
-				if (DeleteAfterCombine) Console.WriteLine("合并后将会删除源文件");
-				else Console.WriteLine("合并后将会重命名源文件");
-				Console.WriteLine($"将要合并 {tasks.Count} 个视频");
 
-				// **修改**：根据文件名前缀 (00_ 或 10_) 分组
-				var groups = tasks
-					.GroupBy(x => Path.GetFileName(x.path).StartsWith("00_") ? "00_" : "10_")
-					.ToList();
-
-				foreach (var group in groups)
+				var srcFullPath = tg.list.Select(Path.GetFullPath).ToArray();
+				if (await CombineAsync(srcFullPath, tmpFile, true).ConfigureAwait(false))
 				{
-					// 获取组名，比如 00_ 或 10_
-					var groupName = group.Key;
+					if (TryFixMoovAtom)
+						Untrunc.LogSucceedCombine(srcFullPath);
 
-					// 对该组中的文件进行合并
-					var groupedFiles = group.OrderBy(x => x.dateTime).Select(x => x.path).ToArray();
-					var outName = $"{groupName}_{GetTargetPathName(0)}";  // 这里可以调整命名规则
-					var outFile = Path.Combine(Target, outName);
-					var tmpFile = outFile + ".tmp";
+					Console.WriteLine("- 合并成功！");
 
-					Console.WriteLine($"=> 合并文件组 {groupName}，目标路径：{outFile}");
-					Console.WriteLine($"=> 包含 {groupedFiles.Length} 视频：");
-					for (int i = 0; i < groupedFiles.Length; i++)
+					if (File.Exists(outFile))
 					{
-			 Console.WriteLine($"  [{i + 1:00000}] {groupedFiles[i]}");
-					}
-
-					try
-					{
-			 Directory.CreateDirectory(Path.GetDirectoryName(outFile)!);
-					}
-					catch e)
-					{
-			 Console.WriteLine($"{groupName} => 创建文件夹失败：{e.Message}");
-			 continue;
-					}
-
-					var srcFullPath = groupedFiles.Select(Path.GetFullPath).ToArray();
-					if (await CombineAsync(srcFullPath, tmpFile, true).ConfigureAwait(false))
-					{
-			 if (TryFixMoovAtom)
-			 Untrunc.LogSucceedCombine(srcFullPath);
-
-			 Console.WriteLine("- 合并成功！");
-
-			 if (File.Exists(outFile))
-			 {
-			 Console.WriteLine("- 已存在原始合并文件，二次合并！");
-			 if (await CombineAsync(new[] { outFile, tmpFile }, tmpFile + ".swp", false).ConfigureAwait(false))
-			 {
-			 Console.WriteLine("- 二次合并完成！");
-			 File.Delete(outFile);
-			 File.Delete(tmpFile);
-			 File.Move(tmpFile + ".swp", outFile);
-			 }
-			 else
-			 {
-			 Console.WriteLine("- 二次合并失败！");
-			 continue;
-			 }
-			 }
-			 else
-			 {
-			 File.Move(tmpFile, outFile);
-			 }
-
-			 Console.WriteLine($"- 正在{(DeleteAfterCombine ? "删除" : "重命名")}源文件");
-			 foreach (var file in srcFullPath)
-			 {
-			 try
-			 {
-			 if (Untrunc.IsReferencedByUntrunc(file))
-			 {
-			 Console.WriteLine($"  - 自动修复参考文件：{file}，暂时保留");
-			 _pendingRemoveFileList.Add(file);
-			 }
-			 else if (DeleteAfterCombine)
-			 {
-			 File.Delete(file);
-			 Console.WriteLine($"  - 已删除：{file}");
-			 }
-			 else
-			 {
-			 Console.WriteLine($"  - 重命名：{file}");
-			 File.Move(file, file + ".old");
-			 }
-			 }
-			 catch e)
-			 {
-			 Console.WriteLine($"  - 无法操作：{file} -> {e.Message}");
-			 }
-			 }
-			 Console.WriteLine("- 操作完成！");
+						Console.WriteLine("- 已存在原始合并文件，二次合并！");
+						if (await CombineAsync(new[] { outFile, tmpFile }, tmpFile + ".swp", false).ConfigureAwait(false))
+						{
+							Console.WriteLine("- 二次合并完成！");
+							File.Delete(outFile);
+							File.Delete(tmpFile);
+							File.Move(tmpFile + ".swp", outFile);
+						}
+						else
+						{
+							Console.WriteLine("- 二次合并失败！");
+							continue;
+						}
 					}
 					else
 					{
-			 Console.WriteLine("- 合并失败！");
-			 if (File.Exists(tmpFile))
-			 File.Delete(tmpFile);
+						File.Move(tmpFile, outFile);
 					}
-					CleanUpPendingFile(false);
-				}
 
-				CleanUpPendingFile(true);
+					Console.WriteLine($"- 正在{(DeleteAfterCombine ? "删除" : "重命名")}源文件");
+					foreach (var file in srcFullPath)
+					{
+						try
+						{
+							if (Untrunc.IsReferencedByUntrunc(file))
+							{
+								Console.WriteLine($"  - 自动修复参考文件：{file}，暂时保留");
+								_pendingRemoveFileList.Add(file);
+							}
+							else if (DeleteAfterCombine)
+							{
+								File.Delete(file);
+								Console.WriteLine($"  - 已删除：{file}");
+							}
+							else
+							{
+								Console.WriteLine($"  - 重命名：{file}");
+								File.Move(file, file + ".old");
+							}
+						}
+						catch (Exception e)
+						{
+							Console.WriteLine($"  - 无法操作：{file} -> {e.Message}");
+						}
+					}
+					Console.WriteLine("- 操作完成！");
+				}
+				else
+				{
+					Console.WriteLine("- 合并失败！");
+					if (File.Exists(tmpFile))
+						File.Delete(tmpFile);
+				}
+				CleanUpPendingFile(false);
 			}
 
+			CleanUpPendingFile(true);
+		}
 
 		/// <summary>
 		/// 清理待清理文件
